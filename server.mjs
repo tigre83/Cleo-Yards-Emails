@@ -1,26 +1,17 @@
 import express from "express";
 import cors from "cors";
 
-/* ═══════════════════════════════════════════════════════════════
-   CLEO YARDS — Email Backend (Railway)
-   Endpoints:
-   - POST /api/emails/invoice      → Send invoice email with Pay Now button
-   - POST /api/emails/job-complete  → Send job completion notification
-   - GET  /health                   → Health check
-   ═══════════════════════════════════════════════════════════════ */
-
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const FROM_EMAIL = process.env.FROM_EMAIL || "invoices@cleoyards.app";
+const FROM_EMAIL = process.env.FROM_EMAIL || "invoices@cleoia.app";
 const APP_URL = process.env.APP_URL || "https://yards.cleoia.app";
+const LOGO_URL = `${APP_URL}/cleo-yards-logo.png`;
 
-// ── Health check
 app.get("/health", (_, res) => res.json({ status: "ok", service: "cleo-yards-emails" }));
 
-// ── Send Resend email helper
 async function sendEmail({ to, subject, html, replyTo }) {
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -38,128 +29,144 @@ async function sendEmail({ to, subject, html, replyTo }) {
   return data;
 }
 
-// ── Invoice Email Template
+const emailHeader = (companyName) => `
+  <div style="text-align:center;padding:28px 24px 20px">
+    <img src="${LOGO_URL}" width="52" height="52" alt="Cleo Yards" style="border-radius:12px;margin-bottom:10px"/>
+    <div style="font-size:20px;font-weight:800;letter-spacing:-0.03em">
+      <span style="color:#16A34A">cleo</span><span style="color:#4ADE80">yards</span>
+    </div>
+    <div style="width:60px;height:2px;border-radius:1px;background:linear-gradient(90deg,#16A34A,#4ADE80);margin:6px auto 0"></div>
+    ${companyName ? `<div style="font-size:12px;color:#64748B;margin-top:8px;font-weight:500">${companyName}</div>` : ""}
+  </div>`;
+
+const emailFooter = (company) => `
+  <div style="text-align:center;padding:20px 24px 8px">
+    <div style="width:40px;height:1px;background:#E2E8F0;margin:0 auto 14px"></div>
+    <p style="font-size:11px;color:#94A3B8;margin:0;line-height:1.6">
+      ${company.name || "Cleo Yards"}${company.address ? ` · ${company.address}` : ""}
+    </p>
+    <p style="font-size:9px;color:#CBD5E1;margin:8px 0 0;letter-spacing:0.08em;text-transform:uppercase">Powered by Cleo Yards</p>
+  </div>`;
+
 function invoiceEmailHtml({ company, client, invoice, items, payUrl }) {
   const total = (invoice.total || 0).toFixed(2);
   const itemRows = (items || []).map(i =>
     `<tr>
-      <td style="padding:10px 12px;border-bottom:1px solid #F1F5F9;font-size:13px;color:#0F172A">${i.name}</td>
-      <td style="padding:10px 8px;border-bottom:1px solid #F1F5F9;font-size:12px;color:#64748B;text-align:center">${i.qty || 1}</td>
-      <td style="padding:10px 12px;border-bottom:1px solid #F1F5F9;font-size:13px;color:#0F172A;text-align:right;font-weight:600">$${((i.qty || 1) * (i.price || 0)).toFixed(2)}</td>
+      <td style="padding:10px 0;border-bottom:1px solid #F1F5F9;font-size:13px;color:#0F172A">${i.name}</td>
+      <td style="padding:10px 0;border-bottom:1px solid #F1F5F9;font-size:12px;color:#64748B;text-align:center">${i.qty || 1}</td>
+      <td style="padding:10px 0;border-bottom:1px solid #F1F5F9;font-size:13px;color:#0F172A;text-align:right;font-weight:600">$${((i.qty || 1) * (i.price || 0)).toFixed(2)}</td>
     </tr>`
   ).join("");
 
-  return `
-<!DOCTYPE html>
+  const dueDateFmt = invoice.dueDate
+    ? new Date(invoice.dueDate + "T12:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
+    : "upon receipt";
+
+  return `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background:#F0FDF4;font-family:'Helvetica Neue',Arial,sans-serif">
+<body style="margin:0;padding:0;background:#F8FAFC;font-family:'Helvetica Neue',Arial,sans-serif">
 <div style="max-width:560px;margin:0 auto;padding:24px 16px">
-
-  <!-- Header -->
-  <div style="background:#fff;border-radius:16px 16px 0 0;padding:24px;border:1px solid #E2E8F0;border-bottom:none;text-align:center">
-    <div style="display:inline-flex;align-items:center;gap:8px;margin-bottom:16px">
-      ${company.logo ? `<img src="${company.logo}" width="36" height="36" style="border-radius:8px"/>` : ""}
-      <span style="font-size:18px;font-weight:800;color:#0F172A">${company.name || "Cleo Yards"}</span>
+  <div style="background:#ffffff;border-radius:16px;border:1px solid #E2E8F0;overflow:hidden">
+    ${emailHeader(company.name)}
+    <div style="background:#16A34A;padding:24px;text-align:center;margin:0 20px;border-radius:12px">
+      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px">AMOUNT DUE</div>
+      <div style="font-size:38px;font-weight:800;color:#fff;letter-spacing:-0.02em">$${total}</div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.7);margin-top:4px">Due ${dueDateFmt}</div>
     </div>
-    <h1 style="font-size:22px;font-weight:800;color:#0F172A;margin:0 0 4px">Invoice ${invoice.invoiceNumber || ""}</h1>
-    <p style="font-size:13px;color:#64748B;margin:0">
-      Due ${invoice.dueDate ? new Date(invoice.dueDate + "T12:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "upon receipt"}
-    </p>
-  </div>
-
-  <!-- Amount -->
-  <div style="background:#16A34A;padding:28px 24px;text-align:center">
-    <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.7);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px">AMOUNT DUE</div>
-    <div style="font-size:36px;font-weight:800;color:#fff;letter-spacing:-0.02em">$${total}</div>
-  </div>
-
-  <!-- Items -->
-  <div style="background:#fff;padding:0 24px;border:1px solid #E2E8F0;border-top:none;border-bottom:none">
-    <table style="width:100%;border-collapse:collapse">
-      <tr style="border-bottom:2px solid #E2E8F0">
-        <th style="padding:14px 12px;font-size:10px;font-weight:700;color:#94A3B8;text-transform:uppercase;text-align:left">Service</th>
-        <th style="padding:14px 8px;font-size:10px;font-weight:700;color:#94A3B8;text-transform:uppercase;text-align:center;width:40px">Qty</th>
-        <th style="padding:14px 12px;font-size:10px;font-weight:700;color:#94A3B8;text-transform:uppercase;text-align:right;width:80px">Amount</th>
-      </tr>
-      ${itemRows}
-    </table>
-    <div style="padding:14px 12px;text-align:right">
-      <span style="font-size:12px;color:#64748B">Subtotal: $${(invoice.subtotal || 0).toFixed(2)}</span><br/>
-      <span style="font-size:12px;color:#64748B">Tax (${(invoice.taxRate || 6.25).toFixed(2)}%): $${(invoice.taxAmount || 0).toFixed(2)}</span><br/>
-      <span style="font-size:16px;font-weight:800;color:#0F172A;margin-top:6px;display:inline-block">Total: $${total}</span>
+    <div style="padding:20px 24px 0">
+      <table style="width:100%;margin-bottom:12px">
+        <tr>
+          <td style="font-size:10px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.06em;padding-bottom:4px">Invoice</td>
+          <td style="font-size:10px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.06em;padding-bottom:4px;text-align:right">Bill To</td>
+        </tr>
+        <tr>
+          <td style="font-size:14px;font-weight:700;color:#0F172A;vertical-align:top">${invoice.invoiceNumber || ""}</td>
+          <td style="font-size:13px;color:#0F172A;text-align:right;vertical-align:top;font-weight:600">${client.name || ""}</td>
+        </tr>
+        <tr>
+          <td style="font-size:11px;color:#64748B">${new Date(invoice.date + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</td>
+          <td style="font-size:11px;color:#64748B;text-align:right">${client.email || ""}</td>
+        </tr>
+      </table>
     </div>
-  </div>
-
-  <!-- Pay Button -->
-  <div style="background:#fff;border-radius:0 0 16px 16px;padding:24px;border:1px solid #E2E8F0;border-top:none;text-align:center">
-    <a href="${payUrl}" style="display:inline-block;padding:14px 48px;background:#16A34A;color:#fff;font-size:15px;font-weight:700;border-radius:10px;text-decoration:none;letter-spacing:0.01em">
-      Pay Now — $${total}
-    </a>
-    <p style="font-size:11px;color:#94A3B8;margin:14px 0 0">Pay via Zelle and upload your confirmation screenshot.</p>
-  </div>
-
-  <!-- Footer -->
-  <div style="text-align:center;padding:24px 0 12px">
-    <p style="font-size:11px;color:#94A3B8;margin:0">${company.name || "Cleo Yards"} · ${company.address || ""}</p>
-    <p style="font-size:10px;color:#C4C4C4;margin:6px 0 0">Powered by Cleo Yards · yards.cleoia.app</p>
+    <div style="padding:0 24px">
+      <table style="width:100%;border-collapse:collapse">
+        <tr style="border-bottom:2px solid #E2E8F0">
+          <th style="padding:10px 0;font-size:10px;font-weight:700;color:#94A3B8;text-transform:uppercase;text-align:left">Service</th>
+          <th style="padding:10px 0;font-size:10px;font-weight:700;color:#94A3B8;text-transform:uppercase;text-align:center;width:40px">Qty</th>
+          <th style="padding:10px 0;font-size:10px;font-weight:700;color:#94A3B8;text-transform:uppercase;text-align:right;width:80px">Amount</th>
+        </tr>
+        ${itemRows}
+      </table>
+      <div style="padding:12px 0;text-align:right;border-top:1px solid #E2E8F0">
+        <div style="font-size:12px;color:#64748B">Subtotal: $${(invoice.subtotal || 0).toFixed(2)}</div>
+        <div style="font-size:12px;color:#64748B">Tax (${(invoice.taxRate || 6.25).toFixed(2)}%): $${(invoice.taxAmount || 0).toFixed(2)}</div>
+        <div style="font-size:18px;font-weight:800;color:#0F172A;margin-top:6px">Total: $${total}</div>
+      </div>
+    </div>
+    <div style="padding:8px 24px 28px;text-align:center">
+      <a href="${payUrl}" style="display:inline-block;padding:14px 52px;background:#16A34A;color:#ffffff;font-size:15px;font-weight:700;border-radius:10px;text-decoration:none">
+        Pay Now &mdash; $${total}
+      </a>
+      <p style="font-size:11px;color:#94A3B8;margin:12px 0 0">Pay via Zelle and upload your confirmation screenshot.</p>
+    </div>
+    ${emailFooter(company)}
   </div>
 </div>
 </body></html>`;
 }
 
-// ── Job Complete Email Template
 function jobCompleteEmailHtml({ company, client, job, services }) {
   const svcList = (services || []).map(s =>
-    `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #F1F5F9">
-      <div style="width:6px;height:6px;border-radius:50%;background:#16A34A;flex-shrink:0"></div>
-      <span style="font-size:13px;color:#0F172A">${s.name}</span>
-    </div>`
+    `<tr><td style="padding:8px 0;border-bottom:1px solid #F1F5F9">
+      <table cellpadding="0" cellspacing="0" border="0"><tr>
+        <td style="width:8px;height:8px;border-radius:50%;background:#16A34A" width="8"></td>
+        <td style="padding-left:10px;font-size:13px;color:#0F172A;font-weight:500">${s.name}</td>
+      </tr></table>
+    </td></tr>`
   ).join("");
 
-  const jobDate = job.date ? new Date(job.date + "T12:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" }) : "";
+  const jobDate = job.date
+    ? new Date(job.date + "T12:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })
+    : "";
 
-  return `
-<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background:#F0FDF4;font-family:'Helvetica Neue',Arial,sans-serif">
+<body style="margin:0;padding:0;background:#F8FAFC;font-family:'Helvetica Neue',Arial,sans-serif">
 <div style="max-width:560px;margin:0 auto;padding:24px 16px">
-
-  <div style="background:#fff;border-radius:16px;padding:28px 24px;border:1px solid #E2E8F0;text-align:center">
-    <div style="width:48px;height:48px;border-radius:50%;background:#DCFCE7;display:inline-flex;align-items:center;justify-content:center;margin-bottom:14px">
-      <span style="font-size:22px">✅</span>
+  <div style="background:#ffffff;border-radius:16px;border:1px solid #E2E8F0;overflow:hidden">
+    ${emailHeader(company.name)}
+    <div style="margin:0 20px;background:#F0FDF4;border:1px solid rgba(22,163,74,0.15);border-radius:12px;padding:20px;text-align:center">
+      <div style="width:44px;height:44px;border-radius:50%;background:#16A34A;margin:0 auto 12px;line-height:44px;text-align:center">
+        <span style="color:#fff;font-size:20px;font-weight:800">&#10003;</span>
+      </div>
+      <div style="font-size:18px;font-weight:800;color:#0F172A;margin-bottom:4px">Service Completed!</div>
+      <div style="font-size:13px;color:#64748B">Hi ${client.name || "there"}, your service has been completed.</div>
     </div>
-    <h1 style="font-size:20px;font-weight:800;color:#0F172A;margin:0 0 6px">Service Completed!</h1>
-    <p style="font-size:13px;color:#64748B;margin:0">Hi ${client.name || "there"}, your service has been completed.</p>
-
-    <div style="background:#F8FAFC;border-radius:10px;padding:16px;margin:20px 0;text-align:left">
-      <div style="font-size:11px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">${jobDate}</div>
-      ${svcList}
+    <div style="padding:20px 24px">
+      <div style="font-size:10px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:10px">${jobDate}</div>
+      <table style="width:100%;border-collapse:collapse">
+        ${svcList}
+      </table>
     </div>
-
-    <p style="font-size:12px;color:#64748B;margin:0">Thank you for choosing ${company.name || "us"}! We look forward to seeing you next time.</p>
-  </div>
-
-  <div style="text-align:center;padding:20px 0 12px">
-    <p style="font-size:11px;color:#94A3B8;margin:0">${company.name || "Cleo Yards"} · ${company.address || ""}</p>
-    <p style="font-size:10px;color:#C4C4C4;margin:6px 0 0">Powered by Cleo Yards · yards.cleoia.app</p>
+    <div style="padding:0 24px 24px;text-align:center">
+      <p style="font-size:13px;color:#64748B;margin:0;line-height:1.6">
+        Thank you for choosing <strong style="color:#0F172A">${company.name || "us"}</strong>!<br/>
+        We look forward to seeing you next time.
+      </p>
+    </div>
+    ${emailFooter(company)}
   </div>
 </div>
 </body></html>`;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// ENDPOINTS
-// ═══════════════════════════════════════════════════════════════
-
-// POST /api/emails/invoice
 app.post("/api/emails/invoice", async (req, res) => {
   try {
     const { company, client, invoice, items } = req.body;
     if (!client?.email || !invoice?.id) return res.status(400).json({ error: "Missing client email or invoice" });
-
     const payUrl = `${APP_URL}/pay/${invoice.id}`;
     const html = invoiceEmailHtml({ company, client, invoice, items, payUrl });
-
     const result = await sendEmail({
       to: client.email,
       subject: `Invoice ${invoice.invoiceNumber || ""} — $${(invoice.total || 0).toFixed(2)} from ${company?.name || "Cleo Yards"}`,
@@ -173,14 +180,11 @@ app.post("/api/emails/invoice", async (req, res) => {
   }
 });
 
-// POST /api/emails/job-complete
 app.post("/api/emails/job-complete", async (req, res) => {
   try {
     const { company, client, job, services } = req.body;
     if (!client?.email) return res.status(400).json({ error: "Missing client email" });
-
     const html = jobCompleteEmailHtml({ company, client, job, services });
-
     const result = await sendEmail({
       to: client.email,
       subject: `Service Completed — ${company?.name || "Cleo Yards"}`,
