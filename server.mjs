@@ -4,8 +4,36 @@ import cron from "node-cron";
 import { createClient } from "@supabase/supabase-js";
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.set("trust proxy", 1); // Railway está detrás de un proxy: así req.ip es la IP real
+
+// CORS: solo tu app (dominio, previews de Vercel de tu equipo y localhost). Los clientes que
+// no son navegador (curl, cron) no mandan Origin y no se ven afectados; sus endpoints sensibles
+// tienen su propio secreto.
+const DEFAULT_ORIGINS = ["https://yards.cleoia.app", "https://cleo-yards.vercel.app", "https://project-hieou.vercel.app"];
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(",").map(x => x.trim()) : DEFAULT_ORIGINS;
+const originAllowed = (o) => !o || ALLOWED_ORIGINS.includes(o)
+  || /^https:\/\/cleo-yards[a-z0-9-]*-tigre83s-projects\.vercel\.app$/.test(o)
+  || /^http:\/\/localhost:\d+$/.test(o);
+app.use(cors({ origin: (origin, cb) => cb(null, originAllowed(origin)) }));
+app.use(express.json({ limit: "200kb" }));
+
+// Límite simple de peticiones por IP (en memoria) para que nadie use el servicio para mandar spam
+const rateHits = new Map();
+const rateLimit = (max, windowMs) => (req, res, next) => {
+  const now = Date.now();
+  const recent = (rateHits.get(req.ip) || []).filter(t => now - t < windowMs);
+  if (recent.length >= max) return res.status(429).json({ error: "Too many requests" });
+  recent.push(now); rateHits.set(req.ip, recent); next();
+};
+app.use("/api/emails", rateLimit(30, 60_000));
+setInterval(() => { const now = Date.now(); for (const [k, v] of rateHits) if (!v.some(t => now - t < 60_000)) rateHits.delete(k); }, 5 * 60_000).unref();
+
+// Escapa HTML en cualquier texto que se va a incrustar dentro de un correo
+const esc = (v) => String(v).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const escDeep = (v) => typeof v === "string" ? esc(v) : Array.isArray(v) ? v.map(escDeep)
+  : (v && typeof v === "object") ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, escDeep(x)])) : v;
+const isEmail = (e) => typeof e === "string" && e.length <= 254 && /^[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+$/.test(e);
+const oneLine = (t) => String(t).replace(/[\r\n]+/g, " ");
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || "invoices@cleoia.app";
@@ -18,9 +46,10 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const COMPANY_ID = process.env.COMPANY_ID || "00000000-0000-0000-0000-000000000001";
 const BILLING_TIMEZONE = process.env.BILLING_TIMEZONE || "America/Chicago";
 const CRON_SECRET = process.env.CRON_SECRET; // protege los endpoints de disparo manual
+const CRON_ENABLED = process.env.BILLING_CRON_ENABLED === "true"; // el cobro automático solo corre si lo activas a propósito
 const supabase = SUPABASE_URL && SUPABASE_SERVICE_KEY ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY) : null;
 
-app.get("/health", (_, res) => res.json({ status: "ok", service: "cleo-yards-emails", billingEnabled: !!supabase }));
+app.get("/health", (_, res) => res.json({ status: "ok", service: "cleo-yards-emails", billingEnabled: !!supabase, cronEnabled: !!supabase && CRON_ENABLED, emailVerification: !!supabase }));
 
 async function sendEmail({ to, subject, html, replyTo }) {
   const res = await fetch("https://api.resend.com/emails", {
@@ -73,7 +102,7 @@ function invoiceEmailHtml({ company, client, invoice, items, payUrl }) {
     : "upon receipt";
 
   return `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta name="format-detection" content="telephone=no,date=no,address=no,email=no"><style>a[x-apple-data-detectors]{color:inherit!important;text-decoration:none!important;font-size:inherit!important;font-family:inherit!important;font-weight:inherit!important;line-height:inherit!important}</style></head>
 <body style="margin:0;padding:0;background:#F8FAFC;font-family:'Helvetica Neue',Arial,sans-serif">
 <div style="max-width:560px;margin:0 auto;padding:24px 16px">
   <div style="background:#ffffff;border-radius:16px;border:1px solid #E2E8F0;overflow:hidden">
@@ -140,7 +169,7 @@ function jobCompleteEmailHtml({ company, client, job, services }) {
     : "";
 
   return `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta name="format-detection" content="telephone=no,date=no,address=no,email=no"><style>a[x-apple-data-detectors]{color:inherit!important;text-decoration:none!important;font-size:inherit!important;font-family:inherit!important;font-weight:inherit!important;line-height:inherit!important}</style></head>
 <body style="margin:0;padding:0;background:#F8FAFC;font-family:'Helvetica Neue',Arial,sans-serif">
 <div style="max-width:560px;margin:0 auto;padding:24px 16px">
   <div style="background:#ffffff;border-radius:16px;border:1px solid #E2E8F0;overflow:hidden">
@@ -184,7 +213,7 @@ function reminderEmailHtml({ company, client, invoices }) {
   }).join("");
 
   return `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta name="format-detection" content="telephone=no,date=no,address=no,email=no"><style>a[x-apple-data-detectors]{color:inherit!important;text-decoration:none!important;font-size:inherit!important;font-family:inherit!important;font-weight:inherit!important;line-height:inherit!important}</style></head>
 <body style="margin:0;padding:0;background:#F8FAFC;font-family:'Helvetica Neue',Arial,sans-serif">
 <div style="max-width:560px;margin:0 auto;padding:24px 16px">
   <div style="background:#ffffff;border-radius:16px;border:1px solid #E2E8F0;overflow:hidden">
@@ -217,42 +246,62 @@ function reminderEmailHtml({ company, client, invoices }) {
 </body></html>`;
 }
 
+// Busca en la base la factura, su cliente y sus líneas. Lo que mande el navegador se ignora.
+async function loadInvoiceForEmail(invoiceId) {
+  const { data: inv, error } = await supabase.from("invoices").select("*").eq("id", invoiceId).eq("company_id", COMPANY_ID).single();
+  if (error || !inv) return null;
+  const { data: client } = await supabase.from("clients").select("*").eq("id", inv.client_id).single();
+  const { data: rows } = await supabase.from("invoice_items").select("*").eq("invoice_id", inv.id);
+  const { data: company } = await supabase.from("companies").select("*").eq("id", COMPANY_ID).single();
+  return {
+    company: company || {},
+    client: client || null,
+    invoice: { id: inv.id, invoiceNumber: inv.invoice_number, date: inv.date, dueDate: inv.due_date, subtotal: Number(inv.subtotal || 0), total: Number(inv.total || 0) },
+    items: (rows || []).map(r => ({ name: r.name, qty: Number(r.qty || 1), price: Number(r.price || 0) })),
+  };
+}
+
+const lastInvoiceEmail = new Map(); // invoiceId -> hora del último envío
+const INVOICE_EMAIL_COOLDOWN_MS = 10_000;
+if (!supabase) console.warn("⚠️  Sin SUPABASE_*: /api/emails/invoice corre en modo SIN VERIFICAR (confía en el destinatario que manda el navegador). Configura SUPABASE_URL y SUPABASE_SERVICE_KEY para activar la verificación.");
+
 app.post("/api/emails/invoice", async (req, res) => {
+  const invoiceId = req.body?.invoice?.id;
   try {
-    const { company, client, invoice, items } = req.body;
-    if (!client?.email || !invoice?.id) return res.status(400).json({ error: "Missing client email or invoice" });
-    const payUrl = `${APP_URL}/pay/${invoice.id}`;
-    const html = invoiceEmailHtml({ company, client, invoice, items, payUrl });
+    if (!invoiceId || typeof invoiceId !== "string" || invoiceId.length > 64) return res.status(400).json({ error: "Missing invoice id" });
+    const last = lastInvoiceEmail.get(invoiceId);
+    if (last && Date.now() - last < INVOICE_EMAIL_COOLDOWN_MS) return res.status(429).json({ error: "This invoice was emailed a few seconds ago" });
+
+    let company, client, invoice, items;
+    if (supabase) {
+      const data = await loadInvoiceForEmail(invoiceId);
+      if (!data) return res.status(404).json({ error: "Invoice not found" });
+      ({ company, client, invoice, items } = data);
+    } else {
+      ({ company, client, invoice, items } = req.body);
+    }
+    if (!isEmail(client?.email)) return res.status(400).json({ error: "Missing or invalid client email" });
+
+    lastInvoiceEmail.set(invoiceId, Date.now()); // se marca antes de enviar para frenar clics dobles simultáneos
+    const safe = escDeep({ company: company || {}, client, invoice, items });
+    const html = invoiceEmailHtml({ ...safe, payUrl: `${APP_URL}/pay/${encodeURIComponent(invoiceId)}` });
     const result = await sendEmail({
       to: client.email,
-      subject: `Invoice ${invoice.invoiceNumber || ""} — $${(invoice.total || 0).toFixed(2)} from ${company?.name || "Cleo Yards"}`,
+      subject: oneLine(`Invoice ${invoice.invoiceNumber || ""} — $${Number(invoice.total || 0).toFixed(2)} from ${company?.name || "Cleo Yards"}`),
       html,
-      replyTo: company?.email,
+      replyTo: isEmail(company?.email) ? company.email : undefined,
     });
     res.json({ success: true, id: result.id });
   } catch (err) {
+    if (invoiceId) lastInvoiceEmail.delete(invoiceId); // si falló, permite reintentar
     console.error("Invoice email error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post("/api/emails/job-complete", async (req, res) => {
-  try {
-    const { company, client, job, services } = req.body;
-    if (!client?.email) return res.status(400).json({ error: "Missing client email" });
-    const html = jobCompleteEmailHtml({ company, client, job, services });
-    const result = await sendEmail({
-      to: client.email,
-      subject: `Service Completed — ${company?.name || "Cleo Yards"}`,
-      html,
-      replyTo: company?.email,
-    });
-    res.json({ success: true, id: result.id });
-  } catch (err) {
-    console.error("Job email error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
+// Desactivado desde Fase 1: elm no quiere avisos al cliente mientras se trabaja (solo se factura el día 1).
+// Además era un endpoint abierto que enviaba correos al destinatario que le pidieran.
+app.post("/api/emails/job-complete", (_, res) => res.status(410).json({ error: "Job-completion emails are disabled" }));
 
 const PORT = process.env.PORT || 3002;
 
@@ -336,8 +385,8 @@ async function runMonthlyBilling({ dryRun = false, clientId = null } = {}) {
     if (client.email) {
       try {
         const html = invoiceEmailHtml({
-          company: company || {}, client, invoice: { ...invoice, invoiceNumber },
-          items: [{ name: description, qty: 1, price: amount }], payUrl: `${APP_URL}/pay/${invoice.id}`,
+          ...escDeep({ company: company || {}, client, invoice: { ...invoice, invoiceNumber }, items: [{ name: description, qty: 1, price: amount }] }),
+          payUrl: `${APP_URL}/pay/${encodeURIComponent(invoice.id)}`,
         });
         await sendEmail({ to: client.email, subject: `Invoice ${invoiceNumber} — $${amount.toFixed(2)} from ${company?.name || "Cleo Yards"}`, html, replyTo: company?.email });
       } catch (e) { results.push({ client: client.name, invoice: invoiceNumber, emailError: e.message }); continue; }
@@ -369,7 +418,7 @@ async function runPaymentReminder({ dryRun = false } = {}) {
     try {
       const total = invoices.reduce((s, i) => s + (i.total || 0), 0);
       if (dryRun) { results.push({ client: client.name, email: client.email, wouldRemind: invoices.length, total }); continue; }
-      const html = reminderEmailHtml({ company: company || {}, client, invoices });
+      const html = reminderEmailHtml(escDeep({ company: company || {}, client, invoices }));
       await sendEmail({ to: client.email, subject: `Payment Reminder — $${total.toFixed(2)} due to ${company?.name || "Cleo Yards"}`, html, replyTo: company?.email });
       results.push({ client: client.name, invoiceCount: invoices.length, total });
     } catch (e) { results.push({ client: client.name, error: e.message }); }
@@ -378,7 +427,7 @@ async function runPaymentReminder({ dryRun = false } = {}) {
 }
 
 // Corre una vez al día; decide internamente si hoy toca facturar o recordar.
-if (supabase) {
+if (supabase && CRON_ENABLED) {
   cron.schedule("0 8 * * *", async () => {
     const today = todayInTimezone(BILLING_TIMEZONE);
     try {
@@ -392,8 +441,10 @@ if (supabase) {
     } catch (e) { console.error("Cron run failed:", e); }
   }, { timezone: BILLING_TIMEZONE });
   console.log(`Billing cron scheduled daily at 08:00 (${BILLING_TIMEZONE})`);
+} else if (supabase) {
+  console.log("Billing cron is OFF (set BILLING_CRON_ENABLED=true to turn it on). Manual endpoints remain available.");
 } else {
-  console.warn("SUPABASE_URL/SUPABASE_SERVICE_KEY not set — monthly billing cron is disabled.");
+  console.warn("SUPABASE_URL/SUPABASE_SERVICE_KEY not set — monthly billing is disabled.");
 }
 
 // Disparo manual (para pruebas, o por si algún día quieres un botón "Facturar ahora").
